@@ -1,111 +1,81 @@
 # 工作流名称：自动下载 PandaQ 文件并添加后缀
 name: Auto-Download PandaQ File & Add Suffix
 
-# 触发条件：
-# 1. 每日定时执行（UTC 时间 02:00 → 北京时间 10:00，可调整）
-# 2. 手动触发（方便测试，避免等定时）
+# 关键修复：添加权限配置，允许写入仓库内容
+permissions:
+  contents: write  # 授予修改仓库文件的权限（解决403错误）
+
+# 触发条件：每日定时 + 手动触发
 on:
   schedule:
-    - cron: '0 2 * * *'  # cron 格式：分 时 日 月 周（UTC 时间）
-  workflow_dispatch:  # 允许在 GitHub 界面手动点击触发
+    - cron: '0 2 * * *'  # UTC 02:00（北京时间 10:00）
+  workflow_dispatch:
 
-# 工作任务（运行在 Ubuntu 系统，兼容性强）
 jobs:
   download-and-process:
     runs-on: ubuntu-latest
     steps:
-      # 步骤 1：检出仓库代码（若需备份文件到仓库，必须执行此步）
       - name: Checkout Repository Code
-        uses: actions/checkout@v4  # 官方检出工具，稳定版 v4
+        uses: actions/checkout@v4  # 检出仓库代码
 
-      # 步骤 2：确保依赖工具可用（curl 用于下载，grep/awk 用于解析响应头）
       - name: Install Required Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl  # Ubuntu 通常已预装，此处做兼容保障
-          echo "✅ 依赖工具（curl）已就绪"
+          sudo apt-get install -y curl
+          echo "✅ 依赖工具已就绪"
 
-      # 步骤 3：访问目标网址，捕获自动下载的文件（核心步骤）
       - name: Auto-Download File from Target URL
         run: |
-          # 目标网址（固定不变，无需修改）
           TARGET_URL="http://1.95.79.193:999/PandaQ"
           
-          # 1. 先发送 HEAD 请求，获取响应头中的文件名（避免直接下载两次）
-          # -I：仅获取响应头，-s：静默模式（不输出冗余日志）
+          # 获取响应头提取文件名
           HEAD_RESPONSE=$(curl -I -s "$TARGET_URL")
-          
-          # 2. 从响应头中提取文件名（响应头格式：Content-Disposition: attachment; filename="xxx.txt"）
-          # 使用 grep 匹配响应头字段，awk 提取文件名，sed 去除引号和空格
           DOWNLOADED_FILENAME=$(echo "$HEAD_RESPONSE" | 
             grep -i 'Content-Disposition' | 
             awk -F 'filename=' '{print $2}' | 
-            sed -e 's/["; ]//g')  # 移除引号、分号、空格等特殊字符
+            sed -e 's/["; ]//g')
           
-          # 3. 兜底处理：若响应头无文件名，使用默认名称（含当前日期，避免重复）
-          if [ -z "$DOWNLOADED_FILENAME" ] || [ "$DOWNLOADED_FILENAME" = " " ]; then
-            echo "ℹ️ 未从响应头获取到文件名，使用默认名称"
+          # 兜底文件名（含日期）
+          if [ -z "$DOWNLOADED_FILENAME" ]; then
             DOWNLOADED_FILENAME="pandaq_auto_download_$(date +'%Y%m%d').dat"
           fi
           
-          # 4. 正式下载文件：-L 跟随重定向，-o 指定保存路径（当前目录）
-          echo "🔄 开始下载文件，目标保存名：$DOWNLOADED_FILENAME"
-          curl -L -s -o "$DOWNLOADED_FILENAME" "$TARGET_URL"
-          # 修改步骤 3 中的 curl 下载命令，添加 -A 参数伪装浏览器
-          curl -L -s -A "okhttp/5.1.0" -o "$DOWNLOADED_FILENAME" "$TARGET_URL"
+          # 下载文件（添加浏览器伪装避免被拦截）
+          curl -L -s -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0" \
+            -o "$DOWNLOADED_FILENAME" "$TARGET_URL"
           
-          # 5. 验证下载是否成功（文件大小 > 0 视为有效）
+          # 验证下载结果
           if [ -s "$DOWNLOADED_FILENAME" ]; then
-            echo "✅ 文件下载成功，大小：$(du -sh "$DOWNLOADED_FILENAME" | awk '{print $1}')"
-            # 保存文件名到环境变量，供后续步骤使用
+            echo "✅ 文件下载成功：$DOWNLOADED_FILENAME"
             echo "DOWNLOADED_FILENAME=$DOWNLOADED_FILENAME" >> "$GITHUB_ENV"
           else
-            echo "❌ 文件下载失败（空文件或无响应），终止流程"
-            exit 1  # 退出并标记失败，便于 GitHub 界面查看错误
+            echo "❌ 下载失败，文件为空"
+            exit 1
           fi
 
-      # 步骤 4：为下载的文件添加自定义后缀
       - name: Add Custom Suffix to File
         run: |
-          # 1. 读取上一步保存的文件名（从环境变量中获取）
           ORIGINAL_FILENAME="${{ env.DOWNLOADED_FILENAME }}"
-          
-          # 2. 定义自定义后缀（可修改，如 .tvbox_backup、.daily_2024 等）
-          CUSTOM_SUFFIX=".pandaq_daily"
-          
-          # 3. 拼接新文件名（原文件名 + 后缀）
+          CUSTOM_SUFFIX=".pandaq_daily"  # 自定义后缀
           NEW_FILENAME="${ORIGINAL_FILENAME}${CUSTOM_SUFFIX}"
-          
-          # 4. 重命名文件（mv 命令：源文件 → 新文件）
           mv "$ORIGINAL_FILENAME" "$NEW_FILENAME"
-          
-          echo "✅ 文件已添加后缀，新文件名：$NEW_FILENAME"
-          # 保存新文件名到环境变量，供备份步骤使用
+          echo "✅ 已添加后缀：$NEW_FILENAME"
           echo "NEW_FILENAME=$NEW_FILENAME" >> "$GITHUB_ENV"
 
-      # 步骤 5：（可选）将处理后的文件提交到 GitHub 仓库备份
-      - name: Backup Processed File to Repository
+      - name: Backup to Repository
         run: |
-          # 1. 读取新文件名（从环境变量中获取）
           BACKUP_FILE="${{ env.NEW_FILENAME }}"
           
-          # 2. 配置 Git 身份（使用 GitHub 官方默认身份，无需修改）
+          # 配置Git身份
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
           
-          # 3. 检查文件是否存在，避免空提交
+          # 提交文件
           if [ -f "$BACKUP_FILE" ]; then
-            # 添加文件到 Git 暂存区
             git add "$BACKUP_FILE"
-            
-            # 提交修改（备注含日期，便于区分版本）
-            git commit -m "Backup PandaQ file: $BACKUP_FILE (Date: $(date +'%Y-%m-%d'))"
-            
-            # 推送到仓库（默认 main 分支，若你的分支是 master，需改为 git push origin master）
-            git push origin main
-            
-            echo "✅ 文件已成功备份到仓库，路径：./$BACKUP_FILE"
+            git commit -m "Backup: $BACKUP_FILE ($(date +'%Y-%m-%d'))"
+            git push origin main  # 若分支为master，改为git push origin master
+            echo "✅ 已备份到仓库"
           else
-            echo "ℹ️ 备份文件不存在，跳过备份步骤"
-            exit 0  # 无文件时正常退出，不标记失败
+            echo "ℹ️ 无文件需备份"
           fi
