@@ -1,101 +1,96 @@
-name: Download and Fix File Extensions
+# 工作流名称：每日获取 PandaQ 网站文件并加后缀
+name: Daily Fetch PandaQ Files & Add Suffix
 
+# 触发条件：
+# 1. 每日 UTC 时间 00:00（对应北京时间 08:00，可根据需求调整）
+# 2. 手动触发（方便测试）
 on:
-  workflow_dispatch:  # 允许手动触发
-    inputs:
-      file_url:
-        description: "URL of the file to download"
-        required: true
-        default: "http://1.95.79.193:999/PandaQ"
-  # schedule:
-  #   - cron: "0 0 * * *"  # 每天 UTC 0:00 自动运行
+  schedule:
+    - cron: '0 0 * * *'  # cron 表达式：分 时 日 月 周，UTC 时间
+  workflow_dispatch:  # 允许手动在 GitHub 界面触发
 
+# 工作流任务
 jobs:
-  download:
-    runs-on: ubuntu-latest  # 也可以换成 windows-latest 或 macos-latest
+  fetch-and-process:
+    runs-on: ubuntu-latest  # 使用 Ubuntu 系统环境（基础且常用）
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      # 步骤 1：检出 GitHub 仓库代码（若需备份文件到仓库，必须执行此步骤）
+      - name: Checkout Repository
+        uses: actions/checkout@v4  # 官方检出工具，v4 为最新稳定版
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: "3.10"
-          persist-credentials: true
-
-      - name: Install dependencies
-        run: pip install requests pyyaml
-
-      - name: Download file and fix extension
-        id: download_file
+      # 步骤 2：安装必要依赖（确保 curl、wget 可用，Ubuntu 通常已预装，此处做兼容处理）
+      - name: Install Dependencies
         run: |
-          import os
-          import requests
-          from urllib.parse import unquote
+          sudo apt-get update
+          sudo apt-get install -y curl wget  # 安装 curl（获取网页）和 wget（下载文件）
 
-          # 获取输入参数
-          url = "${{ github.event.inputs.file_url }}"
-          save_as = "${{ github.event.inputs.save_as }}"
-          save_dir = "downloads"
-          os.makedirs(save_dir, exist_ok=True)
-
-          # Content-Type 到扩展名的映射
-          CONTENT_TYPE_TO_EXTENSION = {
-              "application/zip": ".zip",
-              "application/pdf": ".pdf",
-              "image/jpeg": ".jpg",
-              # 添加更多映射...
-          }
-
-          try:
-              response = requests.get(url, stream=True)
-              response.raise_for_status()
-
-              # 获取文件名（优先使用手动指定的名称）
-              if save_as:
-                  filename = save_as
-              else:
-                  content_disposition = response.headers.get("Content-Disposition", "")
-                  if "filename=" in content_disposition:
-                      filename = unquote(content_disposition.split("filename=")[1].strip('"\''))
-                  else:
-                      filename = os.path.basename(url.split("?")[0]) or "download"
-
-              # 如果没有扩展名，尝试从 Content-Type 获取
-              if not os.path.splitext(filename)[1]:
-                  content_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
-                  file_extension = CONTENT_TYPE_TO_EXTENSION.get(content_type, ".txt")
-                  filename += file_extension
-
-              # 保存文件
-              save_path = os.path.join(save_dir, filename)
-              with open(save_path, "wb") as f:
-                  for chunk in response.iter_content(chunk_size=8192):
-                      if chunk:
-                          f.write(chunk)
-
-              print(f"::set-output name=file_path::{save_path}")
-              print(f"✅ 下载成功: {save_path}")
-
-          except Exception as e:
-              print(f"❌ 下载失败: {e}")
-              exit(1)
-        shell: python
-
-      - name: Commit downloaded file
-        if: success()
+      # 步骤 3：访问目标网站，获取网页内容并保存为临时文件
+      - name: Fetch PandaQ Webpage Content
         run: |
-          git config --global user.name "ltydgit"
-          git config --global user.email "ljjdwyyx@126.com"
-          git add downloads/
-          git commit -m "Add downloaded file"
-          git push
+          # 使用 curl 访问网站，-L 跟随重定向，-o 保存内容到 webpage.html
+          curl -L "http://1.95.79.193:999/PandaQ" -o webpage.html
+          echo "✅ 已获取网页内容，保存为 webpage.html"
 
-      - name: Create Release (Optional)
-        if: success()
-        uses: softprops/action-gh-release@v1
-        with:
-          files: ${{ steps.download_file.outputs.file_path }}
-          tag_name: "v$(date +%Y%m%d)"
-          name: "Downloaded File - $(date +%Y-%m-%d)"
-          body: "Automatically downloaded file from ${{ github.event.inputs.file_url }}"
+      # 步骤 4：提取网页中的文件/接口链接（关键步骤，需根据网页结构调整正则）
+      # 网页中包含的链接格式：http://xxx.com/xxx、https://xxx.com/xxx.json 等
+      - name: Extract File Links from Webpage
+        run: |
+          # 使用 grep + 正则提取所有 http/https 链接，去重后保存到 links.txt
+          grep -Eo 'https?://[a-zA-Z0-9./_%:-]+' webpage.html | sort -u > links.txt
+          echo "✅ 已提取链接列表，共 $(wc -l < links.txt) 个唯一链接"
+          cat links.txt  # 打印链接列表，方便日志查看
+
+      # 步骤 5：下载每个链接对应的文件，并添加自定义后缀
+      - name: Download Files & Add Suffix
+        run: |
+          # 定义自定义后缀（可修改，如 .pandaq.backup、.tvbox.config 等）
+          CUSTOM_SUFFIX=".pandaq_daily"
+          
+          # 循环读取 links.txt 中的每个链接
+          while IFS= read -r link; do
+            # 跳过空行
+            if [ -z "$link" ]; then continue; fi
+            
+            # 提取链接中的文件名（如 https://xxx.json → 文件名 xxx.json）
+            FILENAME=$(basename "$link")
+            
+            # 若链接无明确文件名（如 http://肥猫.com/），默认命名为 index.html
+            if [ -z "$FILENAME" ] || [ "$FILENAME" = "/" ]; then
+              FILENAME="index.html"
+            fi
+            
+            # 下载文件：-O 指定保存文件名，-q 静默模式（减少日志输出）
+            wget -q -O "$FILENAME" "$link"
+            
+            # 检查下载是否成功（文件大小 > 0 视为成功）
+            if [ -s "$FILENAME" ]; then
+              # 为文件添加后缀（如 xxx.json → xxx.json.pandaq_daily）
+              mv "$FILENAME" "${FILENAME}${CUSTOM_SUFFIX}"
+              echo "✅ 成功下载并处理：${FILENAME}${CUSTOM_SUFFIX}"
+            else
+              # 下载失败，删除空文件
+              rm -f "$FILENAME"
+              echo "❌ 下载失败（空文件）：$link"
+            fi
+          done < links.txt  # 从 links.txt 读取链接
+
+      # 步骤 6：（可选）将处理后的文件提交到 GitHub 仓库备份
+      - name: Backup Files to Repository
+        run: |
+          # 配置 Git 用户名和邮箱（使用 GitHub 提供的默认身份）
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          
+          # 检查是否有新文件/修改（仅提交后缀为 CUSTOM_SUFFIX 的文件）
+          CUSTOM_SUFFIX=".pandaq_daily"
+          if ls *"$CUSTOM_SUFFIX" 1> /dev/null 2>&1; then
+            # 添加文件到 Git 暂存区
+            git add *"$CUSTOM_SUFFIX"
+            # 提交修改（备注包含当前日期，便于追溯）
+            git commit -m "Backup PandaQ files: $(date +'%Y-%m-%d')"
+            # 推送到 GitHub 仓库（main 分支，可根据实际分支修改）
+            git push origin main
+            echo "✅ 已将处理后的文件备份到仓库"
+          else
+            echo "ℹ️ 无新文件需要备份"
+          fi
