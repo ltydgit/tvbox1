@@ -1,0 +1,104 @@
+name: Download and Fix File Extensions
+
+on:
+  workflow_dispatch:  # 允许手动触发
+    inputs:
+      file_url:
+        description: "URL of the file to download"
+        required: true
+        default: "http://1.95.79.193:999/PandaQ"
+      save_as:
+        description: "Custom filename (optional)"
+        required: false
+        default: ""
+  schedule:
+    - cron: "0 0 * * *"  # 每天 UTC 0:00 自动运行
+
+jobs:
+  download:
+    runs-on: ubuntu-latest  # 也可以换成 windows-latest 或 macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: pip install requests pyyaml
+
+      - name: Download file and fix extension
+        id: download_file
+        run: |
+          import os
+          import requests
+          from urllib.parse import unquote
+
+          # 获取输入参数
+          url = "${{ github.event.inputs.file_url }}"
+          save_as = "${{ github.event.inputs.save_as }}"
+          save_dir = "downloads"
+          os.makedirs(save_dir, exist_ok=True)
+
+          # Content-Type 到扩展名的映射
+          CONTENT_TYPE_TO_EXTENSION = {
+              "application/zip": ".zip",
+              "application/pdf": ".pdf",
+              "image/jpeg": ".jpg",
+              # 添加更多映射...
+          }
+
+          try:
+              response = requests.get(url, stream=True)
+              response.raise_for_status()
+
+              # 获取文件名（优先使用手动指定的名称）
+              if save_as:
+                  filename = save_as
+              else:
+                  content_disposition = response.headers.get("Content-Disposition", "")
+                  if "filename=" in content_disposition:
+                      filename = unquote(content_disposition.split("filename=")[1].strip('"\''))
+                  else:
+                      filename = os.path.basename(url.split("?")[0]) or "download"
+
+              # 如果没有扩展名，尝试从 Content-Type 获取
+              if not os.path.splitext(filename)[1]:
+                  content_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
+                  file_extension = CONTENT_TYPE_TO_EXTENSION.get(content_type, ".txt")
+                  filename += file_extension
+
+              # 保存文件
+              save_path = os.path.join(save_dir, filename)
+              with open(save_path, "wb") as f:
+                  for chunk in response.iter_content(chunk_size=8192):
+                      if chunk:
+                          f.write(chunk)
+
+              print(f"::set-output name=file_path::{save_path}")
+              print(f"✅ 下载成功: {save_path}")
+
+          except Exception as e:
+              print(f"❌ 下载失败: {e}")
+              exit(1)
+        shell: python
+
+      - name: Commit downloaded file
+        if: success()
+        run: |
+          git config --global user.name "ltydgit"
+          git config --global user.email "aljjdwyyx@126.com"
+          git add downloads/
+          git commit -m "Add downloaded file"
+          git push
+
+      - name: Create Release (Optional)
+        if: success()
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ${{ steps.download_file.outputs.file_path }}
+          tag_name: "v$(date +%Y%m%d)"
+          name: "Downloaded File - $(date +%Y-%m-%d)"
+          body: "Automatically downloaded file from ${{ github.event.inputs.file_url }}"
