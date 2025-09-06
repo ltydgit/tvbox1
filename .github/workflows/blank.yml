@@ -1,96 +1,109 @@
-# 工作流名称：每日获取 PandaQ 网站文件并加后缀
-name: Daily Fetch PandaQ Files & Add Suffix
+# 工作流名称：自动下载 PandaQ 文件并添加后缀
+name: Auto-Download PandaQ File & Add Suffix
 
 # 触发条件：
-# 1. 每日 UTC 时间 00:00（对应北京时间 08:00，可根据需求调整）
-# 2. 手动触发（方便测试）
+# 1. 每日定时执行（UTC 时间 02:00 → 北京时间 10:00，可调整）
+# 2. 手动触发（方便测试，避免等定时）
 on:
   schedule:
-    - cron: '0 0 * * *'  # cron 表达式：分 时 日 月 周，UTC 时间
-  workflow_dispatch:  # 允许手动在 GitHub 界面触发
+    - cron: '0 2 * * *'  # cron 格式：分 时 日 月 周（UTC 时间）
+  workflow_dispatch:  # 允许在 GitHub 界面手动点击触发
 
-# 工作流任务
+# 工作任务（运行在 Ubuntu 系统，兼容性强）
 jobs:
-  fetch-and-process:
-    runs-on: ubuntu-latest  # 使用 Ubuntu 系统环境（基础且常用）
+  download-and-process:
+    runs-on: ubuntu-latest
     steps:
-      # 步骤 1：检出 GitHub 仓库代码（若需备份文件到仓库，必须执行此步骤）
-      - name: Checkout Repository
-        uses: actions/checkout@v4  # 官方检出工具，v4 为最新稳定版
+      # 步骤 1：检出仓库代码（若需备份文件到仓库，必须执行此步）
+      - name: Checkout Repository Code
+        uses: actions/checkout@v4  # 官方检出工具，稳定版 v4
 
-      # 步骤 2：安装必要依赖（确保 curl、wget 可用，Ubuntu 通常已预装，此处做兼容处理）
-      - name: Install Dependencies
+      # 步骤 2：确保依赖工具可用（curl 用于下载，grep/awk 用于解析响应头）
+      - name: Install Required Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl wget  # 安装 curl（获取网页）和 wget（下载文件）
+          sudo apt-get install -y curl  # Ubuntu 通常已预装，此处做兼容保障
+          echo "✅ 依赖工具（curl）已就绪"
 
-      # 步骤 3：访问目标网站，获取网页内容并保存为临时文件
-      - name: Fetch PandaQ Webpage Content
+      # 步骤 3：访问目标网址，捕获自动下载的文件（核心步骤）
+      - name: Auto-Download File from Target URL
         run: |
-          # 使用 curl 访问网站，-L 跟随重定向，-o 保存内容到 webpage.html
-          curl -L "http://1.95.79.193:999/PandaQ" -o webpage.html
-          echo "✅ 已获取网页内容，保存为 webpage.html"
+          # 目标网址（固定不变，无需修改）
+          TARGET_URL="http://1.95.79.193:999/PandaQ"
+          
+          # 1. 先发送 HEAD 请求，获取响应头中的文件名（避免直接下载两次）
+          # -I：仅获取响应头，-s：静默模式（不输出冗余日志）
+          HEAD_RESPONSE=$(curl -I -s "$TARGET_URL")
+          
+          # 2. 从响应头中提取文件名（响应头格式：Content-Disposition: attachment; filename="xxx.txt"）
+          # 使用 grep 匹配响应头字段，awk 提取文件名，sed 去除引号和空格
+          DOWNLOADED_FILENAME=$(echo "$HEAD_RESPONSE" | 
+            grep -i 'Content-Disposition' | 
+            awk -F 'filename=' '{print $2}' | 
+            sed -e 's/["; ]//g')  # 移除引号、分号、空格等特殊字符
+          
+          # 3. 兜底处理：若响应头无文件名，使用默认名称（含当前日期，避免重复）
+          if [ -z "$DOWNLOADED_FILENAME" ] || [ "$DOWNLOADED_FILENAME" = " " ]; then
+            echo "ℹ️ 未从响应头获取到文件名，使用默认名称"
+            DOWNLOADED_FILENAME="pandaq_auto_download_$(date +'%Y%m%d').dat"
+          fi
+          
+          # 4. 正式下载文件：-L 跟随重定向，-o 指定保存路径（当前目录）
+          echo "🔄 开始下载文件，目标保存名：$DOWNLOADED_FILENAME"
+          curl -L -s -o "$DOWNLOADED_FILENAME" "$TARGET_URL"
+          
+          # 5. 验证下载是否成功（文件大小 > 0 视为有效）
+          if [ -s "$DOWNLOADED_FILENAME" ]; then
+            echo "✅ 文件下载成功，大小：$(du -sh "$DOWNLOADED_FILENAME" | awk '{print $1}')"
+            # 保存文件名到环境变量，供后续步骤使用
+            echo "DOWNLOADED_FILENAME=$DOWNLOADED_FILENAME" >> "$GITHUB_ENV"
+          else
+            echo "❌ 文件下载失败（空文件或无响应），终止流程"
+            exit 1  # 退出并标记失败，便于 GitHub 界面查看错误
+          fi
 
-      # 步骤 4：提取网页中的文件/接口链接（关键步骤，需根据网页结构调整正则）
-      # 网页中包含的链接格式：http://xxx.com/xxx、https://xxx.com/xxx.json 等
-      - name: Extract File Links from Webpage
+      # 步骤 4：为下载的文件添加自定义后缀
+      - name: Add Custom Suffix to File
         run: |
-          # 使用 grep + 正则提取所有 http/https 链接，去重后保存到 links.txt
-          grep -Eo 'https?://[a-zA-Z0-9./_%:-]+' webpage.html | sort -u > links.txt
-          echo "✅ 已提取链接列表，共 $(wc -l < links.txt) 个唯一链接"
-          cat links.txt  # 打印链接列表，方便日志查看
-
-      # 步骤 5：下载每个链接对应的文件，并添加自定义后缀
-      - name: Download Files & Add Suffix
-        run: |
-          # 定义自定义后缀（可修改，如 .pandaq.backup、.tvbox.config 等）
+          # 1. 读取上一步保存的文件名（从环境变量中获取）
+          ORIGINAL_FILENAME="${{ env.DOWNLOADED_FILENAME }}"
+          
+          # 2. 定义自定义后缀（可修改，如 .tvbox_backup、.daily_2024 等）
           CUSTOM_SUFFIX=".pandaq_daily"
           
-          # 循环读取 links.txt 中的每个链接
-          while IFS= read -r link; do
-            # 跳过空行
-            if [ -z "$link" ]; then continue; fi
-            
-            # 提取链接中的文件名（如 https://xxx.json → 文件名 xxx.json）
-            FILENAME=$(basename "$link")
-            
-            # 若链接无明确文件名（如 http://肥猫.com/），默认命名为 index.html
-            if [ -z "$FILENAME" ] || [ "$FILENAME" = "/" ]; then
-              FILENAME="index.html"
-            fi
-            
-            # 下载文件：-O 指定保存文件名，-q 静默模式（减少日志输出）
-            wget -q -O "$FILENAME" "$link"
-            
-            # 检查下载是否成功（文件大小 > 0 视为成功）
-            if [ -s "$FILENAME" ]; then
-              # 为文件添加后缀（如 xxx.json → xxx.json.pandaq_daily）
-              mv "$FILENAME" "${FILENAME}${CUSTOM_SUFFIX}"
-              echo "✅ 成功下载并处理：${FILENAME}${CUSTOM_SUFFIX}"
-            else
-              # 下载失败，删除空文件
-              rm -f "$FILENAME"
-              echo "❌ 下载失败（空文件）：$link"
-            fi
-          done < links.txt  # 从 links.txt 读取链接
+          # 3. 拼接新文件名（原文件名 + 后缀）
+          NEW_FILENAME="${ORIGINAL_FILENAME}${CUSTOM_SUFFIX}"
+          
+          # 4. 重命名文件（mv 命令：源文件 → 新文件）
+          mv "$ORIGINAL_FILENAME" "$NEW_FILENAME"
+          
+          echo "✅ 文件已添加后缀，新文件名：$NEW_FILENAME"
+          # 保存新文件名到环境变量，供备份步骤使用
+          echo "NEW_FILENAME=$NEW_FILENAME" >> "$GITHUB_ENV"
 
-      # 步骤 6：（可选）将处理后的文件提交到 GitHub 仓库备份
-      - name: Backup Files to Repository
+      # 步骤 5：（可选）将处理后的文件提交到 GitHub 仓库备份
+      - name: Backup Processed File to Repository
         run: |
-          # 配置 Git 用户名和邮箱（使用 GitHub 提供的默认身份）
+          # 1. 读取新文件名（从环境变量中获取）
+          BACKUP_FILE="${{ env.NEW_FILENAME }}"
+          
+          # 2. 配置 Git 身份（使用 GitHub 官方默认身份，无需修改）
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
           
-          # 检查是否有新文件/修改（仅提交后缀为 CUSTOM_SUFFIX 的文件）
-          CUSTOM_SUFFIX=".pandaq_daily"
-          if ls *"$CUSTOM_SUFFIX" 1> /dev/null 2>&1; then
+          # 3. 检查文件是否存在，避免空提交
+          if [ -f "$BACKUP_FILE" ]; then
             # 添加文件到 Git 暂存区
-            git add *"$CUSTOM_SUFFIX"
-            # 提交修改（备注包含当前日期，便于追溯）
-            git commit -m "Backup PandaQ files: $(date +'%Y-%m-%d')"
-            # 推送到 GitHub 仓库（main 分支，可根据实际分支修改）
+            git add "$BACKUP_FILE"
+            
+            # 提交修改（备注含日期，便于区分版本）
+            git commit -m "Backup PandaQ file: $BACKUP_FILE (Date: $(date +'%Y-%m-%d'))"
+            
+            # 推送到仓库（默认 main 分支，若你的分支是 master，需改为 git push origin master）
             git push origin main
-            echo "✅ 已将处理后的文件备份到仓库"
+            
+            echo "✅ 文件已成功备份到仓库，路径：./$BACKUP_FILE"
           else
-            echo "ℹ️ 无新文件需要备份"
+            echo "ℹ️ 备份文件不存在，跳过备份步骤"
+            exit 0  # 无文件时正常退出，不标记失败
           fi
