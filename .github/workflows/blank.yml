@@ -51,6 +51,8 @@ jobs:
           # 4. 正式下载文件：-L 跟随重定向，-o 指定保存路径（当前目录）
           echo "🔄 开始下载文件，目标保存名：$DOWNLOADED_FILENAME"
           curl -L -s -o "$DOWNLOADED_FILENAME" "$TARGET_URL"
+          # 修改步骤 3 中的 curl 下载命令，添加 -A 参数伪装浏览器
+          curl -L -s -A "okhttp/5.1.0" -o "$DOWNLOADED_FILENAME" "$TARGET_URL"
           
           # 5. 验证下载是否成功（文件大小 > 0 视为有效）
           if [ -s "$DOWNLOADED_FILENAME" ]; then
