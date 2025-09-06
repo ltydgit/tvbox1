@@ -7,12 +7,8 @@ on:
         description: "URL of the file to download"
         required: true
         default: "http://1.95.79.193:999/PandaQ"
-      save_as:
-        description: "Custom filename (optional)"
-        required: false
-        default: ""
-  schedule:
-    - cron: "0 0 * * *"  # 每天 UTC 0:00 自动运行
+  # schedule:
+  #   - cron: "0 0 * * *"  # 每天 UTC 0:00 自动运行
 
 jobs:
   download:
@@ -25,6 +21,7 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: "3.10"
+          persist-credentials: true
 
       - name: Install dependencies
         run: pip install requests pyyaml
