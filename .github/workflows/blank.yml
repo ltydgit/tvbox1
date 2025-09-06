@@ -86,7 +86,7 @@ jobs:
         if: success()
         run: |
           git config --global user.name "ltydgit"
-          git config --global user.email "aljjdwyyx@126.com"
+          git config --global user.email "ljjdwyyx@126.com"
           git add downloads/
           git commit -m "Add downloaded file"
           git push
